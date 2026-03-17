@@ -54,7 +54,7 @@ def should_skip_post(caption: str) -> bool:
         "проверка точк",
         "а у вас клюёт",
         "у вас клюёт",
-        "точки",
+        
     ]
 
     return any(word in text for word in skip_keywords)
