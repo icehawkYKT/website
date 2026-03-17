@@ -164,8 +164,8 @@ def fetch_items_sync():
                 continue
 
             caption_lc = caption.lower()
-            if any(word in caption_lc for word in AD_KEYWORDS):
-                print(f"SKIP msg_id={rep_id} — ad/announcement")
+            if should_skip_post(caption):
+                print(f"SKIP msg_id={rep_id} — unwanted content")
                 cleanup_paths(paths)
                 continue
 
