@@ -7,24 +7,6 @@ from pathlib import Path
 from telethon.sync import TelegramClient
 from telethon.sessions import StringSession
 
-AD_KEYWORDS = [
-    "реклама",
-    "промокод",
-    "анонс",
-    "стрим",
-    "донат",
-    "youtube",
-    "vk.com",
-    "trovo",
-    "ozon",
-    "проверка точки",
-    "проверка точки.",
-    "проверка точк",
-    "а у вас клюёт",
-    "у вас клюёт",
-    "точки",
-]
-
 API_ID = int(os.environ["TG_API_ID"])
 API_HASH = os.environ["TG_API_HASH"]
 TG_SESSION = os.environ["TG_SESSION"]
@@ -32,8 +14,6 @@ TG_SESSION = os.environ["TG_SESSION"]
 SITE_IMPORT_URL = os.environ["SITE_IMPORT_URL"]
 SITE_KEY = os.environ["SITE_KEY"]
 
-# Каналы можно передать строкой через secrets/variables:
-# TG_CHANNELS=rf4map,rr4pepper,NiOoooN_UL
 CHANNELS = [
     ch.strip()
     for ch in os.environ.get("TG_CHANNELS", "rf4map").split(",")
@@ -55,8 +35,32 @@ def cleanup_paths(paths):
             print(f"Warning: failed to remove temp file {p}: {e}")
 
 
+def should_skip_post(caption: str) -> bool:
+    text = (caption or "").lower()
+
+    skip_keywords = [
+        "реклама",
+        "промокод",
+        "анонс",
+        "стрим",
+        "донат",
+        "youtube",
+        "youtu.be",
+        "vk.com",
+        "trovo",
+        "ozon",
+        "проверка точки",
+        "проверка точки.",
+        "проверка точк",
+        "а у вас клюёт",
+        "у вас клюёт",
+        "точки",
+    ]
+
+    return any(word in text for word in skip_keywords)
+
+
 def fetch_items_sync():
-    """Возвращает список постов: {paths: [...], caption: '...', msg_id: 123, channel: 'name'}"""
     items = []
 
     with TelegramClient(StringSession(TG_SESSION), API_ID, API_HASH) as client:
@@ -72,7 +76,6 @@ def fetch_items_sync():
                     getattr(msg, "caption", None) or getattr(msg, "message", None)
                 )
 
-                # пропускаем только полностью пустые
                 if not has_photo and not has_text:
                     continue
 
@@ -86,7 +89,6 @@ def fetch_items_sync():
 
             group_channel = key.rsplit("_", 1)[0]
 
-            # главное сообщение — первое, где есть текст
             main_msg = None
             for m in group_msgs:
                 text = (
@@ -100,7 +102,6 @@ def fetch_items_sync():
             if main_msg is None:
                 main_msg = group_msgs[0]
 
-            # определяем grouped_id альбома
             main_gid = getattr(main_msg, "grouped_id", None)
             if main_gid is None:
                 for m in group_msgs:
@@ -109,7 +110,6 @@ def fetch_items_sync():
                         main_gid = gid
                         break
 
-            # скачиваем только фото этого альбома
             paths = []
             for msg in group_msgs:
                 if getattr(msg, "photo", None) is None:
@@ -117,11 +117,9 @@ def fetch_items_sync():
 
                 msg_gid = getattr(msg, "grouped_id", None)
 
-                # если это альбом — берём только его фото
                 if main_gid is not None and msg_gid != main_gid:
                     continue
 
-                # если это одиночное фото без grouped_id — берём его
                 if main_gid is None and msg.id != main_msg.id and msg_gid is not None:
                     continue
 
@@ -138,7 +136,6 @@ def fetch_items_sync():
             if not paths:
                 continue
 
-            # caption из сообщений этого же альбома/поста
             caption = ""
             for m in group_msgs:
                 msg_gid = getattr(m, "grouped_id", None)
@@ -163,7 +160,6 @@ def fetch_items_sync():
                 cleanup_paths(paths)
                 continue
 
-            caption_lc = caption.lower()
             if should_skip_post(caption):
                 print(f"SKIP msg_id={rep_id} — unwanted content")
                 cleanup_paths(paths)
@@ -180,7 +176,6 @@ def fetch_items_sync():
 
 
 def send_to_site(item: dict):
-    """Шлёт caption + photos[] в import_post.php (multipart/form-data)."""
     data = {
         "key": SITE_KEY,
         "text": item.get("caption", "") or "",
