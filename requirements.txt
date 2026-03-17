@@ -2,3 +2,4 @@ telethon==1.42.0
 requests
 beautifulsoup4
 pymysql
+mysql-connector-python
