@@ -2,7 +2,7 @@ name: Run baits parser
 
 on:
   schedule:
-    - cron: '23 */6 * * *'
+    - cron: '45 */12 * * *'
   workflow_dispatch:
 
 jobs:
