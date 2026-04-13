@@ -8,6 +8,7 @@ import pymysql
 BASE_URL = "https://rf4-stat.ru"
 BAITS_URL = f"{BASE_URL}/baits/"
 
+
 DB_HOST = os.environ["DB_HOST"]
 DB_PORT = int(os.environ["DB_PORT"])
 DB_USER = os.environ["DB_USER"]
