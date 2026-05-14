@@ -15,6 +15,7 @@ DB_USER = os.environ["DB_USER"]
 DB_PASS = os.environ["DB_PASS"]
 DB_NAME = os.environ["DB_NAME"]
 
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NotesFisherBot/1.0",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
