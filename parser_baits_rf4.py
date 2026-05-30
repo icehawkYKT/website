@@ -50,14 +50,13 @@ def get_img_url(img_tag):
     if not img_tag:
         return ""
 
-    # rf4-stat может хранить картинку не только в src,
-    # но и в lazy-load атрибутах.
     possible_attrs = [
         "src",
         "data-src",
         "data-original",
         "data-lazy-src",
         "data-url",
+        "data-original-src",
     ]
 
     src = ""
@@ -68,7 +67,6 @@ def get_img_url(img_tag):
             src = value
             break
 
-    # Иногда картинка может быть в srcset.
     if not src:
         srcset = (img_tag.get("srcset") or "").strip()
         if srcset:
@@ -77,9 +75,14 @@ def get_img_url(img_tag):
     if not src:
         return ""
 
-    # Отсекаем мусорные base64/placeholder, если вдруг попадутся.
     if src.startswith("data:"):
         return ""
+
+    if src.startswith("//"):
+        return "https:" + src
+
+    if src.startswith("http://") or src.startswith("https://"):
+        return src
 
     return urljoin(BASE_URL, src)
 
@@ -112,7 +115,10 @@ def parse_rows_from_html(html: str):
     Возвращает список кортежей:
     (location_name, bait_name, image_url, records)
 
-    Сделано устойчиво под старую и новую верстку rf4-stat.
+    Устойчивая версия:
+    - ищет картинку не только в колонке наживки, а во всей строке;
+    - поддерживает картинки с img.rf4spot.com;
+    - поддерживает старую и новую верстку rf4-stat.
     """
     soup = BeautifulSoup(html, "html.parser")
     parsed = []
@@ -129,29 +135,43 @@ def parse_rows_from_html(html: str):
         if not location_name:
             continue
 
-        # Новая верстка:
+        # Сначала пробуем новую верстку:
         # cols[0] = водоем
-        # cols[1] = наживка + картинка
+        # cols[1] = наживка
         # cols[2] = улов
         bait_col = cols[1]
         records_col_index = 2
 
         bait_name = normalize_space(bait_col.get_text(" ", strip=True))
-        img_tag = bait_col.find("img")
 
-        # Поддержка старой логики, если вдруг наживка лежит в cols[2],
-        # а cols[1] содержит только картинку.
+        # Если во второй колонке только картинка, а название лежит дальше —
+        # используем старую схему.
         if not bait_name and len(cols) >= 4:
             bait_col = cols[2]
             records_col_index = 3
             bait_name = normalize_space(bait_col.get_text(" ", strip=True))
 
-            img_tag = cols[1].find("img") or bait_col.find("img")
-
         if not bait_name:
             continue
 
-        image_url = get_img_url(img_tag)
+        # ВАЖНО:
+        # картинка может быть не внутри bait_col, а просто где-то в этой строке.
+        image_url = ""
+
+        for img in row.find_all("img"):
+            candidate_url = get_img_url(img)
+
+            if not candidate_url:
+                continue
+
+            # Берем только игровые картинки, а не флаги/иконки сайта.
+            if (
+                "/images/rf4game/" in candidate_url
+                or "img.rf4spot.com" in candidate_url
+            ):
+                image_url = candidate_url
+                break
+
         records = extract_records(row, cols, records_col_index)
 
         if records <= 0:
