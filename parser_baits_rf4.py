@@ -50,8 +50,35 @@ def get_img_url(img_tag):
     if not img_tag:
         return ""
 
-    src = (img_tag.get("src") or "").strip()
+    # rf4-stat может хранить картинку не только в src,
+    # но и в lazy-load атрибутах.
+    possible_attrs = [
+        "src",
+        "data-src",
+        "data-original",
+        "data-lazy-src",
+        "data-url",
+    ]
+
+    src = ""
+
+    for attr in possible_attrs:
+        value = (img_tag.get(attr) or "").strip()
+        if value:
+            src = value
+            break
+
+    # Иногда картинка может быть в srcset.
     if not src:
+        srcset = (img_tag.get("srcset") or "").strip()
+        if srcset:
+            src = srcset.split(",")[0].strip().split(" ")[0].strip()
+
+    if not src:
+        return ""
+
+    # Отсекаем мусорные base64/placeholder, если вдруг попадутся.
+    if src.startswith("data:"):
         return ""
 
     return urljoin(BASE_URL, src)
