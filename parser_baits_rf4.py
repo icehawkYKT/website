@@ -46,12 +46,13 @@ def get_records_int(s: str) -> int:
     return int(digits) if digits else 0
 
 
-def get_img_url(img_tag):
-    if not img_tag:
+def get_img_url(tag):
+    if not tag:
         return ""
 
     possible_attrs = [
         "src",
+        "href",
         "data-src",
         "data-original",
         "data-lazy-src",
@@ -62,15 +63,21 @@ def get_img_url(img_tag):
     src = ""
 
     for attr in possible_attrs:
-        value = (img_tag.get(attr) or "").strip()
+        value = (tag.get(attr) or "").strip()
         if value:
             src = value
             break
 
     if not src:
-        srcset = (img_tag.get("srcset") or "").strip()
+        srcset = (tag.get("srcset") or "").strip()
         if srcset:
             src = srcset.split(",")[0].strip().split(" ")[0].strip()
+
+    if not src:
+        style = tag.get("style") or ""
+        m = re.search(r"url\(['\"]?([^'\")]+)['\"]?\)", style)
+        if m:
+            src = m.group(1).strip()
 
     if not src:
         return ""
@@ -85,6 +92,118 @@ def get_img_url(img_tag):
         return src
 
     return urljoin(BASE_URL, src)
+
+
+def is_game_image_url(url: str) -> bool:
+    if not url:
+        return False
+
+    u = url.lower()
+
+    return (
+        "img.rf4spot.com" in u
+        or "/images/rf4game/" in u
+        or "/i/images/rf4game/" in u
+        or u.endswith((".png", ".jpg", ".jpeg", ".webp"))
+    )
+
+
+def find_image_url(container):
+    if not container:
+        return ""
+
+    for tag in container.find_all(["img", "a"]):
+        candidate_url = get_img_url(tag)
+
+        if is_game_image_url(candidate_url):
+            return candidate_url
+
+    for tag in container.find_all(style=True):
+        candidate_url = get_img_url(tag)
+
+        if is_game_image_url(candidate_url):
+            return candidate_url
+
+    return ""
+
+
+def parse_rows_from_html(html: str):
+    """
+    Возвращает список кортежей:
+    (location_name, bait_name, image_url, records)
+
+    Под текущую верстку rf4-stat:
+    0 = водоем
+    1 = колонка с картинками наживки
+    2 = название наживки
+    3 = улов
+
+    Также оставлена поддержка запасного варианта.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    parsed = []
+
+    rows = soup.select("tr")
+
+    for row in rows:
+        cols = row.find_all("td")
+
+        if len(cols) < 3:
+            continue
+
+        location_name = normalize_space(cols[0].get_text(" ", strip=True))
+
+        if not location_name:
+            continue
+
+        image_url = ""
+        bait_name = ""
+        records = 0
+
+        # Основная текущая схема rf4-stat:
+        # Водоем | картинки | наживка | улов | посты | ...
+        if len(cols) >= 4:
+            image_col = cols[1]
+            bait_col = cols[2]
+            records_col_index = 3
+
+            bait_name = normalize_space(bait_col.get_text(" ", strip=True))
+            image_url = find_image_url(image_col)
+
+            records = extract_records(row, cols, records_col_index)
+
+        # Запасной вариант, если верстка снова станет другой:
+        # Водоем | наживка с картинкой | улов | ...
+        if (not bait_name or records <= 0) and len(cols) >= 3:
+            bait_col = cols[1]
+            records_col_index = 2
+
+            fallback_bait_name = normalize_space(bait_col.get_text(" ", strip=True))
+            fallback_image_url = find_image_url(bait_col) or find_image_url(row)
+            fallback_records = extract_records(row, cols, records_col_index)
+
+            if fallback_bait_name and fallback_records > 0:
+                bait_name = fallback_bait_name
+                image_url = fallback_image_url
+                records = fallback_records
+
+        if not bait_name:
+            continue
+
+        if records <= 0:
+            continue
+
+        # Если картинку не нашли в нужной колонке, пробуем по всей строке.
+        if not image_url:
+            image_url = find_image_url(row)
+
+        parsed.append((location_name, bait_name, image_url, records))
+
+    print("DEBUG IMAGE URLS:")
+    for item in parsed[:10]:
+        print(item[0], "|", item[1], "=>", item[2])
+
+    return parsed
 
 
 def extract_records(row, cols, records_col_index: int) -> int:
