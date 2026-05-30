@@ -1,13 +1,15 @@
 import os
 import re
 import time
+from urllib.parse import urljoin
+
 import requests
 from bs4 import BeautifulSoup
 import pymysql
 
+
 BASE_URL = "https://rf4-stat.ru"
 BAITS_URL = f"{BASE_URL}/baits/"
-
 
 DB_HOST = os.environ["DB_HOST"]
 DB_PORT = int(os.environ["DB_PORT"])
@@ -15,17 +17,28 @@ DB_USER = os.environ["DB_USER"]
 DB_PASS = os.environ["DB_PASS"]
 DB_NAME = os.environ["DB_NAME"]
 
+DEBUG_RF4_STAT = os.environ.get("DEBUG_RF4_STAT", "0") == "1"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NotesFisherBot/1.0",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0 Safari/537.36 NotesFisherBot/1.0"
+    ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "ru,en;q=0.8",
+    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
     "Connection": "keep-alive",
 }
+
+_RF4_ALL_ROWS_CACHE = None
 
 
 def normalize_space(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
+
+
+def normalize_name(s: str) -> str:
+    return normalize_space(s).lower().replace("ё", "е")
 
 
 def get_records_int(s: str) -> int:
@@ -33,77 +46,157 @@ def get_records_int(s: str) -> int:
     return int(digits) if digits else 0
 
 
+def get_img_url(img_tag):
+    if not img_tag:
+        return ""
+
+    src = (img_tag.get("src") or "").strip()
+    if not src:
+        return ""
+
+    return urljoin(BASE_URL, src)
+
+
+def extract_records(row, cols, records_col_index: int) -> int:
+    """
+    Пытаемся вытащить количество улова.
+    В новой верстке обычно:
+    0 = водоем
+    1 = наживка
+    2 = улов
+    3 = посты
+    """
+    if len(cols) > records_col_index:
+        records_text = normalize_space(cols[records_col_index].get_text(" ", strip=True))
+        records = get_records_int(records_text)
+        if records:
+            return records
+
+    row_text = normalize_space(row.get_text(" ", strip=True))
+    m = re.search(r"Улов\s*:?\s*([\d\s]+)", row_text, re.IGNORECASE)
+    if m:
+        return get_records_int(m.group(1))
+
+    return 0
+
+
 def parse_rows_from_html(html: str):
     """
     Возвращает список кортежей:
     (location_name, bait_name, image_url, records)
+
+    Сделано устойчиво под старую и новую верстку rf4-stat.
     """
     soup = BeautifulSoup(html, "html.parser")
+    parsed = []
+
     rows = soup.select("tr")
 
-    parsed = []
     for row in rows:
         cols = row.find_all("td")
-        if len(cols) < 4:
+        if len(cols) < 3:
             continue
 
-        img_tag = cols[1].find("img") if len(cols) > 1 else None
-        if not img_tag:
+        location_name = normalize_space(cols[0].get_text(" ", strip=True))
+
+        if not location_name:
             continue
 
-        img = (img_tag.get("src") or "").strip()
-        if not img.startswith("/images/rf4game/"):
+        # Новая верстка:
+        # cols[0] = водоем
+        # cols[1] = наживка + картинка
+        # cols[2] = улов
+        bait_col = cols[1]
+        records_col_index = 2
+
+        bait_name = normalize_space(bait_col.get_text(" ", strip=True))
+        img_tag = bait_col.find("img")
+
+        # Поддержка старой логики, если вдруг наживка лежит в cols[2],
+        # а cols[1] содержит только картинку.
+        if not bait_name and len(cols) >= 4:
+            bait_col = cols[2]
+            records_col_index = 3
+            bait_name = normalize_space(bait_col.get_text(" ", strip=True))
+
+            img_tag = cols[1].find("img") or bait_col.find("img")
+
+        if not bait_name:
             continue
 
-        location_name = normalize_space(cols[0].get_text(strip=True))
-        bait_name = normalize_space(cols[2].get_text(strip=True))
-        records_text = normalize_space(cols[3].get_text(strip=True))
-        records = get_records_int(records_text)
+        image_url = get_img_url(img_tag)
+        records = extract_records(row, cols, records_col_index)
 
-        if not location_name or not bait_name:
+        if records <= 0:
             continue
 
-        image_url = BASE_URL + img
         parsed.append((location_name, bait_name, image_url, records))
 
     return parsed
 
 
+def fetch_all_baits_rows():
+    """
+    rf4-stat сейчас отдает данные наживок прямо HTML-страницей.
+    Поэтому тянем страницу один раз и потом фильтруем по водоему локально.
+    """
+    global _RF4_ALL_ROWS_CACHE
+
+    if _RF4_ALL_ROWS_CACHE is not None:
+        return _RF4_ALL_ROWS_CACHE
+
+    print("Загружаю страницу rf4-stat /baits/ ...")
+
+    session = requests.Session()
+
+    resp = session.get(
+        BAITS_URL,
+        headers=HEADERS,
+        timeout=30,
+    )
+    resp.raise_for_status()
+
+    html = resp.text or ""
+
+    print(f"  URL ответа: {resp.url}")
+    print(f"  HTTP статус: {resp.status_code}")
+    print(f"  Размер HTML: {len(html)} символов")
+    print(f"  Есть слово 'Комариное': {'Комариное' in html}")
+    print(f"  Количество <tr>: {html.count('<tr')}")
+
+    if DEBUG_RF4_STAT:
+        print("===== HTML START DEBUG =====")
+        print(html[:4000])
+        print("===== HTML END DEBUG =====")
+
+    rows = parse_rows_from_html(html)
+
+    print(f"  Всего строк распознано на странице: {len(rows)}")
+
+    if not rows:
+        raise RuntimeError(
+            "Не удалось распознать ни одной строки на rf4-stat. "
+            "Вероятно, изменилась верстка или GitHub Actions получает не ту страницу."
+        )
+
+    _RF4_ALL_ROWS_CACHE = rows
+    return rows
+
+
 def fetch_baits_for_location(location_name: str, max_pages: int = 200):
     """
-    Тянем все страницы для указанной локации.
+    Оставил имя функции старым, чтобы остальной код не ломать.
+    Но теперь max_pages не используется: данные берутся из общей HTML-страницы.
     """
-    all_rows = []
-    seen = set()
+    wanted = normalize_name(location_name)
+    all_rows = fetch_all_baits_rows()
 
-    for page in range(1, max_pages + 1):
-        resp = requests.post(
-            BAITS_URL,
-            params={"location": location_name},
-            data={"ajax": 1, "page": page},
-            headers=HEADERS,
-            timeout=30,
-        )
-        resp.raise_for_status()
+    matched = [
+        row for row in all_rows
+        if normalize_name(row[0]) == wanted
+    ]
 
-        rows = parse_rows_from_html(resp.text)
-        if not rows:
-            break
-
-        new_count = 0
-        for r in rows:
-            key = (r[0], r[1], r[2], r[3])
-            if key not in seen:
-                seen.add(key)
-                all_rows.append(r)
-                new_count += 1
-
-        if new_count == 0:
-            break
-
-        time.sleep(0.2)
-
-    return all_rows
+    return matched
 
 
 def save_rf4_stat_name(conn, loc_id: int, rf4_name: str):
@@ -118,26 +211,32 @@ def save_rf4_stat_name(conn, loc_id: int, rf4_name: str):
 def pick_best_rf4_name(db_name: str):
     """
     Подбираем имя, которое понимает rf4-stat:
-    пробуем 'р. X', потом 'оз. X', потом 'X'
+    пробуем 'р. X', потом 'оз. X', потом 'X'.
     """
     candidates = []
-    if not db_name.startswith(("р.", "оз.")):
-        candidates.append(f"р. {db_name}")
-        candidates.append(f"оз. {db_name}")
-    candidates.append(db_name)
+
+    clean_name = normalize_space(db_name)
+
+    if not clean_name.startswith(("р.", "оз.")):
+        candidates.append(f"р. {clean_name}")
+        candidates.append(f"оз. {clean_name}")
+
+    candidates.append(clean_name)
 
     best_name = None
     best_rows = []
 
     for cand in candidates:
         print(f"  пробуем '{cand}' ...")
+
         try:
             rows = fetch_baits_for_location(cand)
         except Exception as e:
-            print("    ошибка запроса:", e)
+            print("    ошибка запроса/парсинга:", e)
             continue
 
         print(f"    строк получено: {len(rows)}")
+
         if len(rows) > len(best_rows):
             best_rows = rows
             best_name = cand
@@ -154,6 +253,7 @@ def main():
 
     try:
         print("Подключаемся к БД...")
+
         conn = pymysql.connect(
             host=DB_HOST,
             port=DB_PORT,
@@ -164,11 +264,17 @@ def main():
             cursorclass=pymysql.cursors.DictCursor,
             autocommit=False,
         )
+
         cur = conn.cursor()
 
-        cur.execute("SELECT id, name, rf4_stat_name FROM locations")
+        cur.execute("SELECT id, name, rf4_stat_name FROM locations ORDER BY id ASC")
         loc_rows = cur.fetchall()
+
         print(f"Найдено локаций в БД: {len(loc_rows)}")
+
+        # Сразу грузим rf4-stat один раз.
+        # Если тут проблема — таблицу в БД не трогаем.
+        fetch_all_baits_rows()
 
         all_to_insert = []
         total_parsed = 0
@@ -182,17 +288,20 @@ def main():
 
             if rf4_name_saved:
                 print(f"  использую rf4_stat_name из БД: '{rf4_name_saved}'")
+
                 try:
                     rows = fetch_baits_for_location(rf4_name_saved)
                 except Exception as e:
-                    print("  ошибка запроса:", e)
+                    print("  ошибка запроса/парсинга:", e)
                     rows = []
 
                 print(f"  строк получено: {len(rows)}")
 
                 if not rows:
                     print("  сохранённое имя не дало строк, подбираю заново...")
+
                     best_name, best_rows = pick_best_rf4_name(db_name)
+
                     if best_name and best_rows:
                         save_rf4_stat_name(conn, loc_id, best_name)
                         rows = best_rows
@@ -202,6 +311,7 @@ def main():
                         continue
             else:
                 best_name, rows = pick_best_rf4_name(db_name)
+
                 if best_name and rows:
                     save_rf4_stat_name(conn, loc_id, best_name)
                     print(f"  ✅ сохранил rf4_stat_name: '{best_name}'")
@@ -218,7 +328,16 @@ def main():
         print(f"Всего строк спарсено (сырых): {total_parsed}")
         print(f"Строк готово к записи: {len(all_to_insert)}")
 
+        # ВАЖНАЯ защита:
+        # если парсер ничего не собрал — не заменяем рабочую таблицу пустой.
+        if not all_to_insert:
+            raise RuntimeError(
+                "Парсер не собрал ни одной строки. "
+                "Останавливаюсь, чтобы не заменить baits_records пустой таблицей."
+            )
+
         print("\nГотовлю временную таблицу baits_records_tmp...")
+
         cur.execute("DROP TABLE IF EXISTS baits_records_tmp")
         cur.execute("CREATE TABLE baits_records_tmp LIKE baits_records")
         conn.commit()
@@ -232,12 +351,20 @@ def main():
         """
 
         print(f"Пишу {len(all_to_insert)} строк во временную таблицу...")
+
         cur.executemany(sql_tmp, all_to_insert)
         conn.commit()
 
         cur.execute("SELECT COUNT(*) AS total_rows FROM baits_records_tmp")
-        tmp_total = cur.fetchone()["total_rows"]
+        tmp_total = int(cur.fetchone()["total_rows"])
+
         print(f"Во временной таблице строк: {tmp_total}")
+
+        if tmp_total <= 0:
+            raise RuntimeError(
+                "Временная таблица пустая. "
+                "Останавливаюсь, чтобы не заменить рабочую baits_records пустой таблицей."
+            )
 
         print("Атомарно подменяю таблицы через RENAME TABLE...")
 
@@ -259,15 +386,17 @@ def main():
 
         except Exception as e:
             print("ОШИБКА при замене таблиц:", e)
+
             try:
                 cur.execute("DROP TABLE IF EXISTS baits_records_tmp")
                 conn.commit()
             except Exception:
                 pass
+
             raise
 
         cur.execute("SELECT COUNT(*) AS total_rows FROM baits_records")
-        total = cur.fetchone()["total_rows"]
+        total = int(cur.fetchone()["total_rows"])
 
         print(f"Записано в baits_records (факт): {total}")
         print("Готово.")
