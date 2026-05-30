@@ -86,12 +86,22 @@ def get_img_url(tag):
         return ""
 
     if src.startswith("//"):
-        return "https:" + src
+        src = "https:" + src
 
     if src.startswith("http://") or src.startswith("https://"):
+        # ВАЖНО:
+        # rf4-stat в HTML может отдавать img.rf4spot.com,
+        # но реально картинки открываются с cdn.rf4spot.com
+        src = src.replace("https://img.rf4spot.com/", "https://cdn.rf4spot.com/")
+        src = src.replace("http://img.rf4spot.com/", "https://cdn.rf4spot.com/")
         return src
 
-    return urljoin(BASE_URL, src)
+    final_url = urljoin(BASE_URL, src)
+
+    final_url = final_url.replace("https://img.rf4spot.com/", "https://cdn.rf4spot.com/")
+    final_url = final_url.replace("http://img.rf4spot.com/", "https://cdn.rf4spot.com/")
+
+    return final_url
 
 
 def is_game_image_url(url: str) -> bool:
