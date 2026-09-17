@@ -4,7 +4,7 @@ import time
 from urllib.parse import urljoin
 
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup 
 import pymysql
 
 
