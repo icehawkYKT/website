@@ -226,7 +226,7 @@ def main():
             f"Sending channel={it['channel']} msg_id={it['msg_id']} photos={len(it['paths'])}"
         )
         send_to_site(it)
-        time.sleep(0.3)
+        time.sleep(5.0)
 
 
 if __name__ == "__main__":
