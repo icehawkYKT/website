@@ -21,7 +21,7 @@ CHANNELS = [
     if ch.strip()
 ]
 
-LIMIT = int(os.environ.get("TG_LIMIT", "400"))
+LIMIT = int(os.environ.get("TG_LIMIT", "100"))
 
 TMP_DIR = os.path.join(tempfile.gettempdir(), "tg_widget_images")
 Path(TMP_DIR).mkdir(parents=True, exist_ok=True)
