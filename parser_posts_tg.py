@@ -1,11 +1,13 @@
 import os
 import re
 import random
+import socket
 import sys
 import time
 import requests
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 from telethon.sync import TelegramClient
 from telethon.sessions import StringSession
@@ -59,6 +61,7 @@ MIN_ID = env_int("TG_MIN_ID", 0)
 DELAY = env_float("TG_DELAY", 10.0)
 TIMEOUT = env_float("TG_TIMEOUT", 180.0)
 MAX_ATTEMPTS = max(1, env_int("TG_MAX_ATTEMPTS", 5))
+MAX_CONSECUTIVE_FAILURES = max(1, env_int("TG_MAX_CONSECUTIVE_FAILURES", 3))
 TMP_CLEANUP_HOURS = env_int("TG_TMP_CLEANUP_HOURS", 24)
 
 TRANSIENT_STATUS = {408, 425, 429, 500, 502, 503, 504, 522, 524}
@@ -66,13 +69,17 @@ TRANSIENT_STATUS = {408, 425, 429, 500, 502, 503, 504, 522, 524}
 TMP_DIR = env_str("TG_TMP_DIR") or os.path.join(tempfile.gettempdir(), "tg_widget_images")
 Path(TMP_DIR).mkdir(parents=True, exist_ok=True)
 
+_PARSED_URL = urlparse(SITE_IMPORT_URL)
+SITE_HOST = _PARSED_URL.hostname or ""
+SITE_PORT = _PARSED_URL.port or (443 if _PARSED_URL.scheme == "https" else 80)
+
 
 # ------------------------- HTTP-сессия и утилиты ------------------------- #
 
 def new_session():
     session = requests.Session()
     session.headers.update({
-        "User-Agent": "tg-widget-importer/1.2",
+        "User-Agent": "tg-widget-importer/1.3",
         # Шаред-хостинг рвёт keep-alive раньше, чем мы успеваем его переиспользовать,
         # и urllib3 получает SSLEOFError на мёртвом сокете. Свежее соединение на каждый пост.
         "Connection": "close",
@@ -95,6 +102,18 @@ def reset_session():
 
 def log(message):
     print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
+
+
+def site_reachable(timeout=8.0):
+    """Быстрая проверка, что с раннера вообще есть маршрут до сайта."""
+    if not SITE_HOST:
+        return True
+    try:
+        with socket.create_connection((SITE_HOST, SITE_PORT), timeout=timeout):
+            return True
+    except OSError as e:
+        log(f"  проверка связи с {SITE_HOST}:{SITE_PORT} не удалась: {type(e).__name__}: {e}")
+        return False
 
 
 def cleanup_paths(paths):
@@ -412,6 +431,13 @@ def send_to_site(item):
                     f"{type(e).__name__}: {e}"
                 )
                 reset_session()
+
+                # Если маршрута до сайта нет вообще (Errno 101 и подобное) —
+                # не тратим попытки и бэкоффы, сразу сдаёмся по этому посту.
+                if not site_reachable(timeout=5.0):
+                    log("  сеть раннера недоступна — прекращаю попытки для этого поста")
+                    break
+
                 if attempt < MAX_ATTEMPTS:
                     time.sleep(backoff(attempt))
                 continue
@@ -447,6 +473,12 @@ def main():
 
     cleanup_stale(TMP_DIR, TMP_CLEANUP_HOURS)
 
+    # Проверяем маршрут до сайта ДО скачивания фото: иначе можно потратить
+    # 10 минут на загрузку 200 картинок и не суметь отправить ни одной.
+    if not site_reachable():
+        log("КРИТИЧНО: сайт недоступен с раннера — прогон отменён, чтобы не качать фото впустую")
+        return 1
+
     items = fetch_items_sync()
     log(f"Постов к отправке: {len(items)}")
 
@@ -459,6 +491,7 @@ def main():
 
     sent = 0
     failed = 0
+    consecutive_failures = 0
 
     for index, item in enumerate(items, 1):
         log(
@@ -474,8 +507,19 @@ def main():
 
         if ok:
             sent += 1
+            consecutive_failures = 0
         else:
             failed += 1
+            consecutive_failures += 1
+
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                log(
+                    f"КРИТИЧНО: {consecutive_failures} поста подряд не ушли — "
+                    f"похоже, сеть раннера недоступна. Прерываю прогон; "
+                    f"остальное заберёт следующий запуск (дублей не будет)."
+                )
+                log(f"ИТОГ: отправлено={sent}, с ошибками={failed}, всего={len(items)}")
+                return 1
 
         if index < len(items):
             time.sleep(max(0.0, DELAY))
