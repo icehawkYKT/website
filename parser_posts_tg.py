@@ -189,13 +189,19 @@ def should_skip_post(caption):
 
 # ----------------------------- Telegram ----------------------------- #
 
+DOWNLOAD_FAILURES = 0
+
+
 def fetch_items_sync():
+    global DOWNLOAD_FAILURES
+
     items = []
     groups = {}
     group_counts = {}
 
     try:
         with TelegramClient(StringSession(TG_SESSION), API_ID, API_HASH) as client:
+            # ---------- 1. собираем сообщения ----------
             for channel in CHANNELS:
                 log(f"Канал {channel}: запрашиваю до {LIMIT} сообщений (min_id={MIN_ID})")
 
@@ -246,99 +252,111 @@ def fetch_items_sync():
                     f"  {channel}: сообщений={len(msgs)}, "
                     f"постов(групп)={group_counts.get(channel, 0)}"
                 )
+
+            # ---------- 2. скачиваем фото ----------
+            # ВАЖНО: этот блок должен оставаться ВНУТРИ with, иначе клиент уже
+            # отключён и download_media падает с ConnectionError.
+            for key in sorted(groups.keys(), key=lambda k: min(m.id for m in groups[k])):
+                group_msgs = groups[key]
+                group_msgs.sort(key=lambda m: getattr(m, "id", 0))
+
+                group_channel = key.rsplit("_", 1)[0]
+
+                main_msg = None
+                for m in group_msgs:
+                    text = (
+                        (getattr(m, "caption", None) or "").strip()
+                        or (getattr(m, "message", None) or "").strip()
+                    )
+                    if text:
+                        main_msg = m
+                        break
+
+                if main_msg is None:
+                    main_msg = group_msgs[0]
+
+                main_gid = getattr(main_msg, "grouped_id", None)
+                if main_gid is None:
+                    for m in group_msgs:
+                        gid = getattr(m, "grouped_id", None)
+                        if gid is not None:
+                            main_gid = gid
+                            break
+
+                paths = []
+                for msg in group_msgs:
+                    if getattr(msg, "photo", None) is None:
+                        continue
+
+                    msg_gid = getattr(msg, "grouped_id", None)
+
+                    if main_gid is not None and msg_gid != main_gid:
+                        continue
+
+                    if main_gid is None and msg.id != main_msg.id and msg_gid is not None:
+                        continue
+
+                    fname = f"{safe_name(group_channel)}_{msg.id}.jpg"
+                    path = os.path.join(TMP_DIR, fname)
+
+                    try:
+                        if not client.is_connected():
+                            log("  клиент отключился — переподключаюсь")
+                            client.connect()
+
+                        client.download_media(msg, file=path)
+                        if os.path.exists(path):
+                            paths.append(path)
+                        else:
+                            DOWNLOAD_FAILURES += 1
+                            log(f"Warning: download_media не создал файл для msg {msg.id}")
+                    except Exception as e:
+                        DOWNLOAD_FAILURES += 1
+                        log(f"Warning: failed download msg {msg.id}: {type(e).__name__}: {e}")
+
+                if not paths:
+                    log(f"SKIP msg_id={min(m.id for m in group_msgs)} — фото не скачались")
+                    continue
+
+                caption = ""
+                for m in group_msgs:
+                    msg_gid = getattr(m, "grouped_id", None)
+
+                    if main_gid is not None and msg_gid != main_gid:
+                        continue
+
+                    if getattr(m, "caption", None):
+                        caption = str(m.caption).strip()
+                        break
+                    if getattr(m, "message", None):
+                        caption = str(m.message).strip()
+                        break
+
+                if not caption and getattr(main_msg, "raw_text", None):
+                    caption = str(main_msg.raw_text).strip()
+
+                rep_id = min(getattr(m, "id", 0) for m in group_msgs)
+
+                if not caption:
+                    log(f"SKIP msg_id={rep_id} — empty caption")
+                    cleanup_paths(paths)
+                    continue
+
+                if should_skip_post(caption):
+                    log(f"SKIP msg_id={rep_id} — unwanted content")
+                    cleanup_paths(paths)
+                    continue
+
+                items.append({
+                    "paths": paths,
+                    "caption": caption,
+                    "msg_id": rep_id,
+                    "channel": group_channel,
+                })
+
     except Exception as e:
         log(f"КРИТИЧНО: ошибка Telegram: {type(e).__name__}: {e}")
         log("Отправлю то, что успел собрать.")
-
-    for key in sorted(groups.keys(), key=lambda k: min(m.id for m in groups[k])):
-        group_msgs = groups[key]
-        group_msgs.sort(key=lambda m: getattr(m, "id", 0))
-
-        group_channel = key.rsplit("_", 1)[0]
-
-        main_msg = None
-        for m in group_msgs:
-            text = (
-                (getattr(m, "caption", None) or "").strip()
-                or (getattr(m, "message", None) or "").strip()
-            )
-            if text:
-                main_msg = m
-                break
-
-        if main_msg is None:
-            main_msg = group_msgs[0]
-
-        main_gid = getattr(main_msg, "grouped_id", None)
-        if main_gid is None:
-            for m in group_msgs:
-                gid = getattr(m, "grouped_id", None)
-                if gid is not None:
-                    main_gid = gid
-                    break
-
-        paths = []
-        for msg in group_msgs:
-            if getattr(msg, "photo", None) is None:
-                continue
-
-            msg_gid = getattr(msg, "grouped_id", None)
-
-            if main_gid is not None and msg_gid != main_gid:
-                continue
-
-            if main_gid is None and msg.id != main_msg.id and msg_gid is not None:
-                continue
-
-            fname = f"{safe_name(group_channel)}_{msg.id}.jpg"
-            path = os.path.join(TMP_DIR, fname)
-
-            try:
-                client.download_media(msg, file=path)
-                if os.path.exists(path):
-                    paths.append(path)
-            except Exception as e:
-                log(f"Warning: failed download msg {msg.id}: {type(e).__name__}: {e}")
-
-        if not paths:
-            log(f"SKIP msg_id={min(m.id for m in group_msgs)} — фото не скачались")
-            continue
-
-        caption = ""
-        for m in group_msgs:
-            msg_gid = getattr(m, "grouped_id", None)
-
-            if main_gid is not None and msg_gid != main_gid:
-                continue
-
-            if getattr(m, "caption", None):
-                caption = str(m.caption).strip()
-                break
-            if getattr(m, "message", None):
-                caption = str(m.message).strip()
-                break
-
-        if not caption and getattr(main_msg, "raw_text", None):
-            caption = str(main_msg.raw_text).strip()
-
-        rep_id = min(getattr(m, "id", 0) for m in group_msgs)
-
-        if not caption:
-            log(f"SKIP msg_id={rep_id} — empty caption")
-            cleanup_paths(paths)
-            continue
-
-        if should_skip_post(caption):
-            log(f"SKIP msg_id={rep_id} — unwanted content")
-            cleanup_paths(paths)
-            continue
-
-        items.append({
-            "paths": paths,
-            "caption": caption,
-            "msg_id": rep_id,
-            "channel": group_channel,
-        })
 
     return items
 
@@ -388,7 +406,7 @@ def send_to_site(item):
                 resp = post_once(SITE_IMPORT_URL, data, paths)
             except requests.RequestException as e:
                 # SSLError / ConnectionError / Timeout / ChunkedEncodingError и прочее.
-                # Судя по стеку, падало на рукопожатии — тело не ушло, повтор безопасен.
+                # Падение на рукопожатии означает, что тело не ушло — повтор безопасен.
                 log(
                     f"  сеть/SSL (попытка {attempt}/{MAX_ATTEMPTS}): "
                     f"{type(e).__name__}: {e}"
@@ -431,6 +449,13 @@ def main():
 
     items = fetch_items_sync()
     log(f"Постов к отправке: {len(items)}")
+
+    if not items:
+        if DOWNLOAD_FAILURES:
+            log(f"ОШИБКА: ни одного поста не собрано, сбоев скачивания={DOWNLOAD_FAILURES}")
+            return 1
+        log("ВНИМАНИЕ: отправлять нечего (нет новых постов или всё отсеял фильтр)")
+        return 0
 
     sent = 0
     failed = 0
